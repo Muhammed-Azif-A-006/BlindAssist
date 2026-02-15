@@ -1,8 +1,10 @@
+from spatial.distance import compute_distance
+from spatial.direction import compute_direction
 import cv2
 from vision.camera import open_camera
 from vision.detector import YoloV8Detector
 
-TARGET_OBJECT = "cup"   # change this to test: "person", "chair", "cup", "laptop"
+TARGET_OBJECT = "bottle"   # change this to test: "person", "chair", "cup", "laptop"
 MIN_CONF = 0.40
 
 def bbox_area(bbox):
@@ -68,8 +70,12 @@ def main():
             draw_status(frame, f"'{TARGET_OBJECT}' NOT VISIBLE")
         else:
             best = pick_best(matches)
+            h, w = frame.shape[:2]
+            direction = compute_direction(best["bbox"], w)
+            distance = compute_distance(best["bbox"], w, h)
             draw_single(frame, best)
-            draw_status(frame, f"FOUND: {TARGET_OBJECT} (x{len(matches)})")
+            draw_status(frame, f"FOUND: {TARGET_OBJECT} | {direction.upper()} | {distance.upper()} (x{len(matches)})")
+
 
         cv2.imshow("BlindAssist - Day 3 Filter Target", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
