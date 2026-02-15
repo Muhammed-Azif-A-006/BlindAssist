@@ -1,3 +1,4 @@
+from spatial.smoother import StableLabel
 from spatial.distance import compute_distance
 from spatial.direction import compute_direction
 import cv2
@@ -47,6 +48,8 @@ def draw_status(frame, text):
 def main():
     cap = open_camera(index=0, width=640, height=480)
     detector = YoloV8Detector(model_name="yolov8n.pt", conf=MIN_CONF)
+    dir_smoother = StableLabel(window=5)
+    dist_smoother = StableLabel(window=5)
 
     print(f"Filtering enabled. Target = '{TARGET_OBJECT}'")
     print("Press 'q' to quit.")
@@ -73,6 +76,9 @@ def main():
             h, w = frame.shape[:2]
             direction = compute_direction(best["bbox"], w)
             distance = compute_distance(best["bbox"], w, h)
+            direction = dir_smoother.update(direction)
+            distance = dist_smoother.update(distance)
+
             draw_single(frame, best)
             draw_status(frame, f"FOUND: {TARGET_OBJECT} | {direction.upper()} | {distance.upper()} (x{len(matches)})")
 
