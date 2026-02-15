@@ -1,3 +1,5 @@
+import time
+from audio.tts import TTS
 from spatial.smoother import StableLabel
 from spatial.distance import compute_distance
 from spatial.direction import compute_direction
@@ -48,8 +50,14 @@ def draw_status(frame, text):
 def main():
     cap = open_camera(index=0, width=640, height=480)
     detector = YoloV8Detector(model_name="yolov8n.pt", conf=MIN_CONF)
-    dir_smoother = StableLabel(window=5)
-    dist_smoother = StableLabel(window=5)
+    dir_smoother = StableLabel(window=3)
+    dist_smoother = StableLabel(window=3)
+    tts = TTS(rate=175)
+    last_spoken = ""
+    last_spoken_time = 0.0
+    SPEAK_COOLDOWN = 1.5  # seconds
+    REPEAT_INTERVAL = 4.0  # repeat same guidance every 4 sec
+
 
     print(f"Filtering enabled. Target = '{TARGET_OBJECT}'")
     print("Press 'q' to quit.")
@@ -71,6 +79,22 @@ def main():
         # 2) Pick best match or show status
         if not matches:
             draw_status(frame, f"'{TARGET_OBJECT}' NOT VISIBLE")
+            now = time.time()
+            speech = f"{TARGET_OBJECT} not visible"
+            print("speech:", speech)
+
+            should_speak = False
+            if speech != last_spoken and (now - last_spoken_time) >= 1.5:
+                should_speak = True
+            elif speech == last_spoken and (now - last_spoken_time) >= 6.0:  # repeat slower
+                should_speak = True
+
+            if should_speak:
+                tts.speak(speech)
+                last_spoken = speech
+                last_spoken_time = now
+
+
         else:
             best = pick_best(matches)
             h, w = frame.shape[:2]
@@ -81,12 +105,30 @@ def main():
 
             draw_single(frame, best)
             draw_status(frame, f"FOUND: {TARGET_OBJECT} | {direction.upper()} | {distance.upper()} (x{len(matches)})")
+            speech = f"{TARGET_OBJECT} {direction} {distance}"
+            print("speech:", speech)
+
+            now = time.time()
+            should_speak = False
+
+            # Speak if message changed and cooldown passed
+            if speech != last_spoken and (now - last_spoken_time) >= SPEAK_COOLDOWN:
+                should_speak = True
+
+            # Or repeat same message occasionally (so user keeps hearing guidance)
+            elif speech == last_spoken and (now - last_spoken_time) >= REPEAT_INTERVAL:
+                should_speak = True
+
+            if should_speak:
+                tts.speak(speech)
+                last_spoken = speech
+                last_spoken_time = now
 
 
         cv2.imshow("BlindAssist - Day 3 Filter Target", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
-
+    tts.close()
     cap.release()
     cv2.destroyAllWindows()
 
