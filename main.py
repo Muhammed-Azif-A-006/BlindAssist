@@ -1,3 +1,4 @@
+from voice.listen import listen_for_command
 import time
 from audio.tts import TTS
 from spatial.smoother import StableLabel
@@ -7,18 +8,23 @@ import cv2
 from vision.camera import open_camera
 from vision.detector import YoloV8Detector
 
-TARGET_OBJECT = "bottle"   # change this to test: "person", "chair", "cup", "laptop"
+TARGET_OBJECT = "person"
 MIN_CONF = 0.40
+
+SUPPORTED_OBJECTS = {
+    "person", "bottle", "chair", "cup", "laptop",
+    "cell phone", "book", "backpack"
+}
+
 
 def bbox_area(bbox):
     x1, y1, x2, y2 = bbox
     return max(0, x2 - x1) * max(0, y2 - y1)
 
+
 def pick_best(detections):
-    """
-    Pick the 'closest' object = largest bbox area.
-    """
     return max(detections, key=lambda d: bbox_area(d["bbox"]))
+
 
 def draw_single(frame, det):
     x1, y1, x2, y2 = det["bbox"]
@@ -36,6 +42,7 @@ def draw_single(frame, det):
         2
     )
 
+
 def draw_status(frame, text):
     cv2.putText(
         frame,
@@ -47,20 +54,26 @@ def draw_status(frame, text):
         2
     )
 
+
 def main():
+    target_object = TARGET_OBJECT
+    MIC_INDEX = None
+
     cap = open_camera(index=0, width=640, height=480)
     detector = YoloV8Detector(model_name="yolov8n.pt", conf=MIN_CONF)
+
     dir_smoother = StableLabel(window=3)
     dist_smoother = StableLabel(window=3)
+
     tts = TTS(rate=175)
-    last_spoken = ""
-    last_spoken_time = 0.0
-    SPEAK_COOLDOWN = 1.5  # seconds
-    REPEAT_INTERVAL = 4.0  # repeat same guidance every 4 sec
 
+    # ================= STATE MACHINE =================
+    prev_direction = None
+    prev_distance = None
+    was_visible = False
 
-    print(f"Filtering enabled. Target = '{TARGET_OBJECT}'")
-    print("Press 'q' to quit.")
+    print(f"Filtering enabled. Target = '{target_object}'")
+    print("Press 'v' for voice command, 'q' to quit.")
 
     while True:
         ok, frame = cap.read()
@@ -70,67 +83,119 @@ def main():
 
         detections = detector.detect(frame)
 
-        # 1) Filter by label + confidence
+        key = cv2.waitKey(1) & 0xFF
+
+        # ================= VOICE INTENT =================
+        if key == ord("v"):
+            cmd = listen_for_command(device_index=MIC_INDEX)
+
+            if not cmd:
+                continue
+
+            print("Command received:", cmd)
+
+            if "stop" in cmd:
+                target_object = None
+                tts.speak("Search stopped")
+                prev_direction = None
+                prev_distance = None
+                was_visible = False
+                continue
+
+            if "what" in cmd and "see" in cmd:
+                if detections:
+                    labels = sorted(set(d["label"] for d in detections))
+                    seen = ", ".join(labels)
+                    tts.speak(f"I see {seen}")
+                else:
+                    tts.speak("I see nothing")
+                continue
+
+            if "find" in cmd:
+                words = cmd.split()
+                candidate = words[-1]
+
+                if candidate in SUPPORTED_OBJECTS:
+                    target_object = candidate
+                    tts.speak(f"Searching for {target_object}")
+
+                    dir_smoother = StableLabel(window=3)
+                    dist_smoother = StableLabel(window=3)
+
+                    prev_direction = None
+                    prev_distance = None
+                    was_visible = False
+                else:
+                    tts.speak(f"{candidate} is not supported")
+
+        if key == ord("q"):
+            break
+
+        # ================= SEARCH STATE =================
+        if target_object is None:
+            draw_status(frame, "SEARCH STOPPED")
+            cv2.imshow("BlindAssist - Event Intelligence", frame)
+            continue
+
         matches = [
             d for d in detections
-            if d["label"].lower() == TARGET_OBJECT.lower() and d["conf"] >= MIN_CONF
+            if d["label"].lower() == target_object.lower()
+            and d["conf"] >= MIN_CONF
         ]
 
-        # 2) Pick best match or show status
         if not matches:
-            draw_status(frame, f"'{TARGET_OBJECT}' NOT VISIBLE")
-            now = time.time()
-            speech = f"{TARGET_OBJECT} not visible"
-            print("speech:", speech)
+            draw_status(frame, f"{target_object} NOT VISIBLE")
 
-            should_speak = False
-            if speech != last_spoken and (now - last_spoken_time) >= 1.5:
-                should_speak = True
-            elif speech == last_spoken and (now - last_spoken_time) >= 6.0:  # repeat slower
-                should_speak = True
-
-            if should_speak:
-                tts.speak(speech)
-                last_spoken = speech
-                last_spoken_time = now
-
+            if was_visible:
+                tts.speak(f"{target_object} lost")
+                was_visible = False
+                prev_direction = None
+                prev_distance = None
 
         else:
             best = pick_best(matches)
+
             h, w = frame.shape[:2]
             direction = compute_direction(best["bbox"], w)
             distance = compute_distance(best["bbox"], w, h)
+
             direction = dir_smoother.update(direction)
             distance = dist_smoother.update(distance)
 
             draw_single(frame, best)
-            draw_status(frame, f"FOUND: {TARGET_OBJECT} | {direction.upper()} | {distance.upper()} (x{len(matches)})")
-            speech = f"{TARGET_OBJECT} {direction} {distance}"
-            print("speech:", speech)
+            draw_status(
+                frame,
+                f"FOUND: {target_object} | {direction.upper()} | {distance.upper()} (x{len(matches)})"
+            )
 
-            now = time.time()
-            should_speak = False
+            # ================= IMPROVED EVENT LOGIC =================
 
-            # Speak if message changed and cooldown passed
-            if speech != last_spoken and (now - last_spoken_time) >= SPEAK_COOLDOWN:
-                should_speak = True
+            # First detection → speak full spatial info
+            if not was_visible:
+                tts.speak(f"{target_object} {direction} {distance}")
+                was_visible = True
 
-            # Or repeat same message occasionally (so user keeps hearing guidance)
-            elif speech == last_spoken and (now - last_spoken_time) >= REPEAT_INTERVAL:
-                should_speak = True
+            else:
+                # Direction changed
+                if direction != prev_direction:
+                    tts.speak(direction)
 
-            if should_speak:
-                tts.speak(speech)
-                last_spoken = speech
-                last_spoken_time = now
+                # Distance changed
+                elif distance != prev_distance:
+                    if distance == "near":
+                        tts.speak("very close")
+                    else:
+                        tts.speak(distance)
 
+            prev_direction = direction
+            prev_distance = distance
 
-        cv2.imshow("BlindAssist - Day 3 Filter Target", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+        cv2.imshow("BlindAssist - Event Intelligence", frame)
+
     tts.close()
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
